@@ -7,6 +7,8 @@ public sealed class FirstPersonController : MonoBehaviour
 {
     [Header("Camera")]
     [SerializeField] private Transform cameraRoot;
+    [SerializeField] private bool synchronizeChildCameras = true;
+    [SerializeField] private bool maintainCameraEyeHeight = true;
     [SerializeField] private float standingCameraHeight = 1.65f;
     [SerializeField] private float crouchingCameraHeight = 1.0f;
 
@@ -50,9 +52,13 @@ public sealed class FirstPersonController : MonoBehaviour
     private InputAction fallbackJumpAction;
     private InputAction fallbackSprintAction;
     private InputAction fallbackCrouchAction;
+    private Transform[] controlledCameras = System.Array.Empty<Transform>();
     private Vector3 horizontalVelocity;
+    private Vector3 cameraLocalPosition;
     private float verticalVelocity;
     private float pitch;
+    private float cameraYaw;
+    private float cameraRoll;
 
     private InputAction MoveInput => moveAction != null ? moveAction.action : fallbackMoveAction;
     private InputAction LookInput => lookAction != null ? lookAction.action : fallbackLookAction;
@@ -66,10 +72,10 @@ public sealed class FirstPersonController : MonoBehaviour
         characterController.height = standingHeight;
         characterController.center = new Vector3(0f, standingHeight * 0.5f, 0f);
 
-        Camera childCamera = GetComponentInChildren<Camera>();
-        if (childCamera != null)
+        Camera[] childCameras = GetComponentsInChildren<Camera>(true);
+        if (childCameras.Length > 0)
         {
-            cameraRoot = childCamera.transform;
+            cameraRoot = childCameras[0].transform;
         }
     }
 
@@ -79,16 +85,28 @@ public sealed class FirstPersonController : MonoBehaviour
 
         if (cameraRoot == null)
         {
-            Camera childCamera = GetComponentInChildren<Camera>();
-            if (childCamera != null)
+            Camera[] childCameras = GetComponentsInChildren<Camera>(true);
+            if (childCameras.Length > 0)
             {
-                cameraRoot = childCamera.transform;
+                cameraRoot = childCameras[0].transform;
             }
         }
 
+        controlledCameras = FindControlledCameras();
+
         if (cameraRoot != null)
         {
-            pitch = NormalizePitch(cameraRoot.localEulerAngles.x);
+            cameraLocalPosition = cameraRoot.localPosition;
+            Vector3 cameraAngles = cameraRoot.localEulerAngles;
+            pitch = NormalizePitch(cameraAngles.x);
+            cameraYaw = cameraAngles.y;
+            cameraRoll = cameraAngles.z;
+
+            if (maintainCameraEyeHeight)
+            {
+                cameraLocalPosition.y = standingCameraHeight;
+                ApplyCameraPose();
+            }
         }
 
         CreateFallbackActions();
@@ -155,7 +173,7 @@ public sealed class FirstPersonController : MonoBehaviour
 
         transform.Rotate(Vector3.up, look.x * sensitivity, Space.Self);
         pitch = Mathf.Clamp(pitch + look.y * sensitivity * ySign, -verticalLookLimit, verticalLookLimit);
-        cameraRoot.localRotation = Quaternion.Euler(pitch, 0f, 0f);
+        ApplyCameraPose();
     }
 
     private void UpdateMovement()
@@ -201,11 +219,10 @@ public sealed class FirstPersonController : MonoBehaviour
         characterController.height = Mathf.Lerp(characterController.height, targetHeight, crouchBlendSpeed * Time.deltaTime);
         characterController.center = new Vector3(0f, characterController.height * 0.5f, 0f);
 
-        if (cameraRoot != null)
+        if (maintainCameraEyeHeight && cameraRoot != null)
         {
-            Vector3 cameraPosition = cameraRoot.localPosition;
-            cameraPosition.y = Mathf.Lerp(cameraPosition.y, targetCameraHeight, crouchBlendSpeed * Time.deltaTime);
-            cameraRoot.localPosition = cameraPosition;
+            cameraLocalPosition.y = Mathf.Lerp(cameraLocalPosition.y, targetCameraHeight, crouchBlendSpeed * Time.deltaTime);
+            ApplyCameraPose();
         }
     }
 
@@ -243,6 +260,43 @@ public sealed class FirstPersonController : MonoBehaviour
         fallbackCrouchAction = new InputAction("Crouch", InputActionType.Button);
         fallbackCrouchAction.AddBinding("<Keyboard>/c");
         fallbackCrouchAction.AddBinding("<Gamepad>/buttonEast");
+    }
+
+    private Transform[] FindControlledCameras()
+    {
+        if (!synchronizeChildCameras)
+        {
+            return cameraRoot != null ? new[] { cameraRoot } : System.Array.Empty<Transform>();
+        }
+
+        Camera[] childCameras = GetComponentsInChildren<Camera>(true);
+        Transform[] cameraTransforms = new Transform[childCameras.Length];
+        for (int i = 0; i < childCameras.Length; i++)
+        {
+            cameraTransforms[i] = childCameras[i].transform;
+        }
+
+        return cameraTransforms;
+    }
+
+    private void ApplyCameraPose()
+    {
+        Quaternion rotation = Quaternion.Euler(pitch, cameraYaw, cameraRoll);
+
+        for (int i = 0; i < controlledCameras.Length; i++)
+        {
+            if (controlledCameras[i] == null)
+            {
+                continue;
+            }
+
+            controlledCameras[i].localRotation = rotation;
+
+            if (maintainCameraEyeHeight)
+            {
+                controlledCameras[i].localPosition = cameraLocalPosition;
+            }
+        }
     }
 
     private static void EnableInput(InputAction action)
