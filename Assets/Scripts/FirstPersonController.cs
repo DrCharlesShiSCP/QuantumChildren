@@ -1,0 +1,300 @@
+using UnityEngine;
+using UnityEngine.InputSystem;
+
+[DisallowMultipleComponent]
+[RequireComponent(typeof(CharacterController))]
+public sealed class FirstPersonController : MonoBehaviour
+{
+    [Header("Camera")]
+    [SerializeField] private Transform cameraRoot;
+    [SerializeField] private float standingCameraHeight = 1.65f;
+    [SerializeField] private float crouchingCameraHeight = 1.0f;
+
+    [Header("Movement")]
+    [SerializeField] private float walkSpeed = 5f;
+    [SerializeField] private float sprintSpeed = 8f;
+    [SerializeField] private float crouchSpeed = 2.5f;
+    [SerializeField] private float acceleration = 18f;
+    [SerializeField] private float airControl = 0.35f;
+    [SerializeField] private float jumpHeight = 1.2f;
+    [SerializeField] private float gravity = -24f;
+    [SerializeField] private float groundedStickForce = -2f;
+
+    [Header("Look")]
+    [SerializeField] private float mouseSensitivity = 0.08f;
+    [SerializeField] private float gamepadLookSensitivity = 140f;
+    [SerializeField] private float verticalLookLimit = 85f;
+    [SerializeField] private bool invertY;
+
+    [Header("Crouch")]
+    [SerializeField] private bool enableCrouch = true;
+    [SerializeField] private float standingHeight = 1.8f;
+    [SerializeField] private float crouchingHeight = 1.1f;
+    [SerializeField] private float crouchBlendSpeed = 12f;
+
+    [Header("Input Actions")]
+    [Tooltip("Optional. Leave empty to use built-in WASD, mouse, Space, Left Shift, and C bindings.")]
+    [SerializeField] private InputActionReference moveAction;
+    [SerializeField] private InputActionReference lookAction;
+    [SerializeField] private InputActionReference jumpAction;
+    [SerializeField] private InputActionReference sprintAction;
+    [SerializeField] private InputActionReference crouchAction;
+
+    [Header("Cursor")]
+    [SerializeField] private bool lockCursorOnEnable = true;
+    [SerializeField] private bool unlockCursorWithEscape = true;
+
+    private CharacterController characterController;
+    private InputAction fallbackMoveAction;
+    private InputAction fallbackLookAction;
+    private InputAction fallbackJumpAction;
+    private InputAction fallbackSprintAction;
+    private InputAction fallbackCrouchAction;
+    private Vector3 horizontalVelocity;
+    private float verticalVelocity;
+    private float pitch;
+
+    private InputAction MoveInput => moveAction != null ? moveAction.action : fallbackMoveAction;
+    private InputAction LookInput => lookAction != null ? lookAction.action : fallbackLookAction;
+    private InputAction JumpInput => jumpAction != null ? jumpAction.action : fallbackJumpAction;
+    private InputAction SprintInput => sprintAction != null ? sprintAction.action : fallbackSprintAction;
+    private InputAction CrouchInput => crouchAction != null ? crouchAction.action : fallbackCrouchAction;
+
+    private void Reset()
+    {
+        characterController = GetComponent<CharacterController>();
+        characterController.height = standingHeight;
+        characterController.center = new Vector3(0f, standingHeight * 0.5f, 0f);
+
+        Camera childCamera = GetComponentInChildren<Camera>();
+        if (childCamera != null)
+        {
+            cameraRoot = childCamera.transform;
+        }
+    }
+
+    private void Awake()
+    {
+        characterController = GetComponent<CharacterController>();
+
+        if (cameraRoot == null)
+        {
+            Camera childCamera = GetComponentInChildren<Camera>();
+            if (childCamera != null)
+            {
+                cameraRoot = childCamera.transform;
+            }
+        }
+
+        if (cameraRoot != null)
+        {
+            pitch = NormalizePitch(cameraRoot.localEulerAngles.x);
+        }
+
+        CreateFallbackActions();
+    }
+
+    private void OnEnable()
+    {
+        EnableInput(MoveInput);
+        EnableInput(LookInput);
+        EnableInput(JumpInput);
+        EnableInput(SprintInput);
+        EnableInput(CrouchInput);
+
+        if (lockCursorOnEnable)
+        {
+            LockCursor();
+        }
+    }
+
+    private void OnDisable()
+    {
+        DisableInput(MoveInput);
+        DisableInput(LookInput);
+        DisableInput(JumpInput);
+        DisableInput(SprintInput);
+        DisableInput(CrouchInput);
+
+        UnlockCursor();
+    }
+
+    private void OnDestroy()
+    {
+        fallbackMoveAction?.Dispose();
+        fallbackLookAction?.Dispose();
+        fallbackJumpAction?.Dispose();
+        fallbackSprintAction?.Dispose();
+        fallbackCrouchAction?.Dispose();
+    }
+
+    private void Update()
+    {
+        if (unlockCursorWithEscape && Keyboard.current != null && Keyboard.current.escapeKey.wasPressedThisFrame)
+        {
+            UnlockCursor();
+        }
+
+        UpdateLook();
+        UpdateCrouch();
+        UpdateMovement();
+    }
+
+    private void UpdateLook()
+    {
+        if (cameraRoot == null)
+        {
+            return;
+        }
+
+        Vector2 look = LookInput.ReadValue<Vector2>();
+        bool usingMouse = LookInput.activeControl != null && LookInput.activeControl.device is Mouse;
+
+        float sensitivity = usingMouse ? mouseSensitivity : gamepadLookSensitivity * Time.deltaTime;
+        float ySign = invertY ? 1f : -1f;
+
+        transform.Rotate(Vector3.up, look.x * sensitivity, Space.Self);
+        pitch = Mathf.Clamp(pitch + look.y * sensitivity * ySign, -verticalLookLimit, verticalLookLimit);
+        cameraRoot.localRotation = Quaternion.Euler(pitch, 0f, 0f);
+    }
+
+    private void UpdateMovement()
+    {
+        Vector2 move = MoveInput.ReadValue<Vector2>();
+        move = Vector2.ClampMagnitude(move, 1f);
+
+        bool isGrounded = characterController.isGrounded;
+        bool wantsSprint = SprintInput.IsPressed();
+        bool isCrouching = IsCrouching();
+        float targetSpeed = isCrouching ? crouchSpeed : wantsSprint ? sprintSpeed : walkSpeed;
+
+        Vector3 targetVelocity = (transform.right * move.x + transform.forward * move.y) * targetSpeed;
+        float control = isGrounded ? 1f : airControl;
+        horizontalVelocity = Vector3.Lerp(horizontalVelocity, targetVelocity, acceleration * control * Time.deltaTime);
+
+        if (isGrounded && verticalVelocity < 0f)
+        {
+            verticalVelocity = groundedStickForce;
+        }
+
+        if (isGrounded && JumpInput.WasPressedThisFrame() && !isCrouching)
+        {
+            verticalVelocity = Mathf.Sqrt(jumpHeight * -2f * gravity);
+        }
+
+        verticalVelocity += gravity * Time.deltaTime;
+        Vector3 velocity = horizontalVelocity + Vector3.up * verticalVelocity;
+        characterController.Move(velocity * Time.deltaTime);
+    }
+
+    private void UpdateCrouch()
+    {
+        if (!enableCrouch)
+        {
+            return;
+        }
+
+        bool isCrouching = IsCrouching();
+        float targetHeight = isCrouching ? crouchingHeight : standingHeight;
+        float targetCameraHeight = isCrouching ? crouchingCameraHeight : standingCameraHeight;
+
+        characterController.height = Mathf.Lerp(characterController.height, targetHeight, crouchBlendSpeed * Time.deltaTime);
+        characterController.center = new Vector3(0f, characterController.height * 0.5f, 0f);
+
+        if (cameraRoot != null)
+        {
+            Vector3 cameraPosition = cameraRoot.localPosition;
+            cameraPosition.y = Mathf.Lerp(cameraPosition.y, targetCameraHeight, crouchBlendSpeed * Time.deltaTime);
+            cameraRoot.localPosition = cameraPosition;
+        }
+    }
+
+    private bool IsCrouching()
+    {
+        return enableCrouch && CrouchInput.IsPressed();
+    }
+
+    private void CreateFallbackActions()
+    {
+        fallbackMoveAction = new InputAction("Move", InputActionType.Value, expectedControlType: "Vector2");
+        fallbackMoveAction.AddCompositeBinding("2DVector")
+            .With("Up", "<Keyboard>/w")
+            .With("Up", "<Keyboard>/upArrow")
+            .With("Down", "<Keyboard>/s")
+            .With("Down", "<Keyboard>/downArrow")
+            .With("Left", "<Keyboard>/a")
+            .With("Left", "<Keyboard>/leftArrow")
+            .With("Right", "<Keyboard>/d")
+            .With("Right", "<Keyboard>/rightArrow");
+        fallbackMoveAction.AddBinding("<Gamepad>/leftStick");
+
+        fallbackLookAction = new InputAction("Look", InputActionType.Value, expectedControlType: "Vector2");
+        fallbackLookAction.AddBinding("<Mouse>/delta");
+        fallbackLookAction.AddBinding("<Gamepad>/rightStick");
+
+        fallbackJumpAction = new InputAction("Jump", InputActionType.Button);
+        fallbackJumpAction.AddBinding("<Keyboard>/space");
+        fallbackJumpAction.AddBinding("<Gamepad>/buttonSouth");
+
+        fallbackSprintAction = new InputAction("Sprint", InputActionType.Button);
+        fallbackSprintAction.AddBinding("<Keyboard>/leftShift");
+        fallbackSprintAction.AddBinding("<Gamepad>/leftStickPress");
+
+        fallbackCrouchAction = new InputAction("Crouch", InputActionType.Button);
+        fallbackCrouchAction.AddBinding("<Keyboard>/c");
+        fallbackCrouchAction.AddBinding("<Gamepad>/buttonEast");
+    }
+
+    private static void EnableInput(InputAction action)
+    {
+        if (action != null && !action.enabled)
+        {
+            action.Enable();
+        }
+    }
+
+    private static void DisableInput(InputAction action)
+    {
+        if (action != null && action.enabled)
+        {
+            action.Disable();
+        }
+    }
+
+    private static float NormalizePitch(float angle)
+    {
+        return angle > 180f ? angle - 360f : angle;
+    }
+
+    private static void LockCursor()
+    {
+        Cursor.lockState = CursorLockMode.Locked;
+        Cursor.visible = false;
+    }
+
+    private static void UnlockCursor()
+    {
+        Cursor.lockState = CursorLockMode.None;
+        Cursor.visible = true;
+    }
+
+    private void OnValidate()
+    {
+        walkSpeed = Mathf.Max(0f, walkSpeed);
+        sprintSpeed = Mathf.Max(walkSpeed, sprintSpeed);
+        crouchSpeed = Mathf.Max(0f, crouchSpeed);
+        acceleration = Mathf.Max(0f, acceleration);
+        airControl = Mathf.Clamp01(airControl);
+        jumpHeight = Mathf.Max(0f, jumpHeight);
+        gravity = Mathf.Min(-0.01f, gravity);
+        groundedStickForce = Mathf.Min(0f, groundedStickForce);
+        mouseSensitivity = Mathf.Max(0f, mouseSensitivity);
+        gamepadLookSensitivity = Mathf.Max(0f, gamepadLookSensitivity);
+        verticalLookLimit = Mathf.Clamp(verticalLookLimit, 1f, 89f);
+        standingHeight = Mathf.Max(0.1f, standingHeight);
+        crouchingHeight = Mathf.Clamp(crouchingHeight, 0.1f, standingHeight);
+        standingCameraHeight = Mathf.Max(0f, standingCameraHeight);
+        crouchingCameraHeight = Mathf.Max(0f, crouchingCameraHeight);
+        crouchBlendSpeed = Mathf.Max(0f, crouchBlendSpeed);
+    }
+}
