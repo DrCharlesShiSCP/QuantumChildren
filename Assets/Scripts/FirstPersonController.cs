@@ -41,6 +41,17 @@ public sealed class FirstPersonController : MonoBehaviour
     [SerializeField] private InputActionReference jumpAction;
     [SerializeField] private InputActionReference sprintAction;
     [SerializeField] private InputActionReference crouchAction;
+    [SerializeField] private InputActionReference interactAction;
+    [SerializeField] private InputActionReference attackAction;
+
+    [Header("Pickup")]
+    [SerializeField] private string pickupTag = "Pickup";
+    [SerializeField] private float pickupRange = 3f;
+    [SerializeField] private float pickupRadius = 0.25f;
+    [SerializeField] private float holdDistance = 2f;
+    [SerializeField] private float holdMoveSpeed = 18f;
+    [SerializeField] private float maxHoldDistance = 4f;
+    [SerializeField] private float throwForce = 12f;
 
     [Header("Cursor")]
     [SerializeField] private bool lockCursorOnEnable = true;
@@ -52,19 +63,27 @@ public sealed class FirstPersonController : MonoBehaviour
     private InputAction fallbackJumpAction;
     private InputAction fallbackSprintAction;
     private InputAction fallbackCrouchAction;
+    private InputAction fallbackInteractAction;
+    private InputAction fallbackAttackAction;
     private Transform[] controlledCameras = System.Array.Empty<Transform>();
+    private Collider[] heldColliders = System.Array.Empty<Collider>();
     private Vector3 horizontalVelocity;
     private Vector3 cameraLocalPosition;
     private float verticalVelocity;
     private float pitch;
     private float cameraYaw;
     private float cameraRoll;
+    private Rigidbody heldRigidbody;
+    private bool heldUseGravity;
+    private bool heldWasKinematic;
 
     private InputAction MoveInput => moveAction != null ? moveAction.action : fallbackMoveAction;
     private InputAction LookInput => lookAction != null ? lookAction.action : fallbackLookAction;
     private InputAction JumpInput => jumpAction != null ? jumpAction.action : fallbackJumpAction;
     private InputAction SprintInput => sprintAction != null ? sprintAction.action : fallbackSprintAction;
     private InputAction CrouchInput => crouchAction != null ? crouchAction.action : fallbackCrouchAction;
+    private InputAction InteractInput => interactAction != null ? interactAction.action : fallbackInteractAction;
+    private InputAction AttackInput => attackAction != null ? attackAction.action : fallbackAttackAction;
 
     private void Reset()
     {
@@ -119,6 +138,8 @@ public sealed class FirstPersonController : MonoBehaviour
         EnableInput(JumpInput);
         EnableInput(SprintInput);
         EnableInput(CrouchInput);
+        EnableInput(InteractInput);
+        EnableInput(AttackInput);
 
         if (lockCursorOnEnable)
         {
@@ -133,6 +154,10 @@ public sealed class FirstPersonController : MonoBehaviour
         DisableInput(JumpInput);
         DisableInput(SprintInput);
         DisableInput(CrouchInput);
+        DisableInput(InteractInput);
+        DisableInput(AttackInput);
+
+        ReleaseHeldObject();
 
         UnlockCursor();
     }
@@ -144,6 +169,8 @@ public sealed class FirstPersonController : MonoBehaviour
         fallbackJumpAction?.Dispose();
         fallbackSprintAction?.Dispose();
         fallbackCrouchAction?.Dispose();
+        fallbackInteractAction?.Dispose();
+        fallbackAttackAction?.Dispose();
     }
 
     private void Update()
@@ -156,6 +183,12 @@ public sealed class FirstPersonController : MonoBehaviour
         UpdateLook();
         UpdateCrouch();
         UpdateMovement();
+        UpdatePickupInput();
+    }
+
+    private void FixedUpdate()
+    {
+        UpdateHeldObject();
     }
 
     private void UpdateLook()
@@ -186,7 +219,16 @@ public sealed class FirstPersonController : MonoBehaviour
         bool isCrouching = IsCrouching();
         float targetSpeed = isCrouching ? crouchSpeed : wantsSprint ? sprintSpeed : walkSpeed;
 
-        Vector3 targetVelocity = (transform.right * move.x + transform.forward * move.y) * targetSpeed;
+        Vector3 moveRight = transform.right;
+        Vector3 moveForward = transform.forward;
+
+        if (cameraRoot != null)
+        {
+            moveForward = Vector3.ProjectOnPlane(cameraRoot.forward, Vector3.up).normalized;
+            moveRight = Vector3.ProjectOnPlane(cameraRoot.right, Vector3.up).normalized;
+        }
+
+        Vector3 targetVelocity = (moveRight * move.x + moveForward * move.y) * targetSpeed;
         float control = isGrounded ? 1f : airControl;
         horizontalVelocity = Vector3.Lerp(horizontalVelocity, targetVelocity, acceleration * control * Time.deltaTime);
 
@@ -231,6 +273,154 @@ public sealed class FirstPersonController : MonoBehaviour
         return enableCrouch && CrouchInput.IsPressed();
     }
 
+    private void UpdatePickupInput()
+    {
+        if (InteractInput.WasPressedThisFrame())
+        {
+            if (heldRigidbody != null)
+            {
+                ReleaseHeldObject();
+            }
+            else
+            {
+                TryPickupObject();
+            }
+        }
+
+        if (heldRigidbody != null && AttackInput.WasPressedThisFrame())
+        {
+            ThrowHeldObject();
+        }
+    }
+
+    private void UpdateHeldObject()
+    {
+        if (heldRigidbody == null)
+        {
+            return;
+        }
+
+        Vector3 holdTarget = GetHoldTarget();
+        Vector3 toTarget = holdTarget - heldRigidbody.worldCenterOfMass;
+
+        if (toTarget.magnitude > maxHoldDistance)
+        {
+            ReleaseHeldObject();
+            return;
+        }
+
+        heldRigidbody.linearVelocity = toTarget * holdMoveSpeed;
+        heldRigidbody.angularVelocity = Vector3.zero;
+    }
+
+    private void TryPickupObject()
+    {
+        Vector3 rayOrigin = cameraRoot != null ? cameraRoot.position : transform.position + Vector3.up * standingCameraHeight;
+        Vector3 rayDirection = cameraRoot != null ? cameraRoot.forward : transform.forward;
+        Ray ray = new Ray(rayOrigin, rayDirection);
+
+        if (!Physics.SphereCast(ray, pickupRadius, out RaycastHit hit, pickupRange, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
+        {
+            return;
+        }
+
+        Rigidbody candidate = ResolvePickupRigidbody(hit.collider);
+        if (candidate == null)
+        {
+            return;
+        }
+
+        heldRigidbody = candidate;
+        heldUseGravity = heldRigidbody.useGravity;
+        heldWasKinematic = heldRigidbody.isKinematic;
+        heldColliders = heldRigidbody.GetComponentsInChildren<Collider>(true);
+
+        heldRigidbody.useGravity = false;
+        heldRigidbody.isKinematic = false;
+        heldRigidbody.linearVelocity = Vector3.zero;
+        heldRigidbody.angularVelocity = Vector3.zero;
+
+        SetHeldCollisionIgnored(true);
+    }
+
+    private Rigidbody ResolvePickupRigidbody(Collider hitCollider)
+    {
+        Transform current = hitCollider.transform;
+
+        while (current != null)
+        {
+            if (current.CompareTag(pickupTag))
+            {
+                Rigidbody pickupBody = current.GetComponent<Rigidbody>();
+                if (pickupBody != null)
+                {
+                    return pickupBody;
+                }
+
+                if (hitCollider.attachedRigidbody != null)
+                {
+                    return hitCollider.attachedRigidbody;
+                }
+
+                return current.GetComponentInChildren<Rigidbody>();
+            }
+
+            current = current.parent;
+        }
+
+        return null;
+    }
+
+    private void ThrowHeldObject()
+    {
+        if (heldRigidbody == null)
+        {
+            return;
+        }
+
+        Rigidbody thrownBody = heldRigidbody;
+        ReleaseHeldObject();
+
+        Vector3 throwDirection = cameraRoot != null ? cameraRoot.forward : transform.forward;
+        thrownBody.useGravity = true;
+        thrownBody.isKinematic = false;
+        thrownBody.linearVelocity = throwDirection * throwForce;
+    }
+
+    private void ReleaseHeldObject()
+    {
+        if (heldRigidbody == null)
+        {
+            return;
+        }
+
+        SetHeldCollisionIgnored(false);
+        heldRigidbody.useGravity = heldUseGravity;
+        heldRigidbody.isKinematic = heldWasKinematic;
+        heldRigidbody = null;
+        heldColliders = System.Array.Empty<Collider>();
+    }
+
+    private void SetHeldCollisionIgnored(bool ignored)
+    {
+        for (int i = 0; i < heldColliders.Length; i++)
+        {
+            if (heldColliders[i] == null)
+            {
+                continue;
+            }
+
+            Physics.IgnoreCollision(characterController, heldColliders[i], ignored);
+        }
+    }
+
+    private Vector3 GetHoldTarget()
+    {
+        Vector3 origin = cameraRoot != null ? cameraRoot.position : transform.position + Vector3.up * standingCameraHeight;
+        Vector3 direction = cameraRoot != null ? cameraRoot.forward : transform.forward;
+        return origin + direction * holdDistance;
+    }
+
     private void CreateFallbackActions()
     {
         fallbackMoveAction = new InputAction("Move", InputActionType.Value, expectedControlType: "Vector2");
@@ -260,6 +450,14 @@ public sealed class FirstPersonController : MonoBehaviour
         fallbackCrouchAction = new InputAction("Crouch", InputActionType.Button);
         fallbackCrouchAction.AddBinding("<Keyboard>/c");
         fallbackCrouchAction.AddBinding("<Gamepad>/buttonEast");
+
+        fallbackInteractAction = new InputAction("Interact", InputActionType.Button);
+        fallbackInteractAction.AddBinding("<Keyboard>/e");
+        fallbackInteractAction.AddBinding("<Gamepad>/buttonNorth");
+
+        fallbackAttackAction = new InputAction("Attack", InputActionType.Button);
+        fallbackAttackAction.AddBinding("<Mouse>/leftButton");
+        fallbackAttackAction.AddBinding("<Gamepad>/buttonWest");
     }
 
     private Transform[] FindControlledCameras()
@@ -350,5 +548,11 @@ public sealed class FirstPersonController : MonoBehaviour
         standingCameraHeight = Mathf.Max(0f, standingCameraHeight);
         crouchingCameraHeight = Mathf.Max(0f, crouchingCameraHeight);
         crouchBlendSpeed = Mathf.Max(0f, crouchBlendSpeed);
+        pickupRange = Mathf.Max(0.1f, pickupRange);
+        pickupRadius = Mathf.Max(0f, pickupRadius);
+        holdDistance = Mathf.Max(0.1f, holdDistance);
+        holdMoveSpeed = Mathf.Max(0.1f, holdMoveSpeed);
+        maxHoldDistance = Mathf.Max(holdDistance, maxHoldDistance);
+        throwForce = Mathf.Max(0f, throwForce);
     }
 }

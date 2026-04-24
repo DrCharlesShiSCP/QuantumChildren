@@ -3,7 +3,8 @@
 --- !u!78 &1
 TagManager:
   serializedVersion: 3
-  tags: []
+  tags:
+  - Pickup
   layers:
   - Default
   - TransparentFX
@@ -15,7 +16,7 @@ TagManager:
   - During
   - After
   - LongAfter
-  - 
+  - ChildrenLayer
   - 
   - 
   - 
@@ -47,6 +48,6 @@ TagManager:
   - During
   - After
   - LongAfter
-  - Light Layer 5
+  - ChildLayer
   - Light Layer 6
   - Light Layer 7
